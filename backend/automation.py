@@ -19,7 +19,11 @@ import subprocess
 import threading
 import webbrowser
 import urllib.parse
+import psutil
 from typing import Callable, Optional
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Optional: pyautogui for typing/clicking (pip install pyautogui)
 try:
@@ -62,6 +66,31 @@ APP_MAP = {
     "powershell":   "powershell",
     "task manager": "taskmgr",
     "paint":        "mspaint",
+    "teams":        "teams",
+    "zoom":         "zoom",
+    "whatsapp":     "whatsapp",
+    "telegram":     "telegram",
+}
+
+# ─── Process Name Map (for close_app) ────────────────────────────────────────
+PROCESS_MAP = {
+    "discord":      "Discord.exe",
+    "chrome":       "chrome.exe",
+    "firefox":      "firefox.exe",
+    "notepad":      "notepad.exe",
+    "calculator":   "CalculatorApp.exe",
+    "calc":         "CalculatorApp.exe",
+    "vlc":          "vlc.exe",
+    "spotify":      "Spotify.exe",
+    "vscode":       "Code.exe",
+    "code":         "Code.exe",
+    "teams":        "Teams.exe",
+    "zoom":         "Zoom.exe",
+    "word":         "WINWORD.EXE",
+    "excel":        "EXCEL.EXE",
+    "powerpoint":   "POWERPNT.EXE",
+    "task manager": "Taskmgr.exe",
+    "paint":        "mspaint.exe",
 }
 
 # ─── Action Result ────────────────────────────────────────────────────────────
@@ -214,6 +243,139 @@ def press_key(key: str) -> ActionResult:
         return ActionResult(False, f"❌ Key press failed: {e}", "press_key")
 
 
+# ─── Close App ────────────────────────────────────────────────────────────────
+
+def close_app(app_name: str) -> ActionResult:
+    """Close/kill a running application by name."""
+    name_lower = app_name.lower().strip()
+    # Try known process name first
+    proc_name = PROCESS_MAP.get(name_lower, app_name)
+    killed = []
+    try:
+        import psutil
+        for proc in psutil.process_iter(["name", "pid"]):
+            try:
+                pname = proc.info["name"] or ""
+                if pname.lower() == proc_name.lower() or name_lower in pname.lower():
+                    proc.terminate()
+                    killed.append(pname)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        if killed:
+            return ActionResult(True, f"✅ Closed: {', '.join(set(killed))}", "close_app")
+        return ActionResult(False, f"❌ '{app_name}' is not running", "close_app")
+    except ImportError:
+        # Fallback: taskkill
+        try:
+            subprocess.run(["taskkill", "/F", "/IM", proc_name], capture_output=True)
+            return ActionResult(True, f"✅ Closed: {app_name}", "close_app")
+        except Exception as e:
+            return ActionResult(False, f"❌ Close failed: {e}", "close_app")
+
+
+# ─── Email Sending (Browser Automation) ─────────────────────────────────────
+
+def send_email(to: str, subject: str, body: str) -> ActionResult:
+    """
+    Send an email by opening Gmail compose in the browser with pre-filled fields,
+    then auto-pressing Ctrl+Enter to send.
+    No credentials needed — just be logged into Gmail in Chrome.
+    """
+    if not to:
+        return ActionResult(False, "❌ No recipient email provided.", "send_email")
+
+    try:
+        # Build Gmail compose URL with all fields pre-filled
+        params = urllib.parse.urlencode({
+            "view": "cm",
+            "fs": "1",
+            "to": to,
+            "su": subject or "",
+            "body": body or "",
+        })
+        gmail_url = f"https://mail.google.com/mail/?{params}"
+
+        # Open Gmail compose in browser
+        webbrowser.open(gmail_url)
+
+        if not PYAUTOGUI_AVAILABLE:
+            return ActionResult(
+                True,
+                f"✅ Gmail compose opened for {to}\nPress Ctrl+Enter to send.",
+                "send_email"
+            )
+
+        # Wait for Gmail to fully load (compose window appears)
+        time.sleep(4.5)
+
+        # Auto-press Ctrl+Enter to send the email
+        pyautogui.hotkey("ctrl", "Return")
+
+        return ActionResult(
+            True,
+            f"✅ Email sent to {to}!\nSubject: {subject or '(no subject)'}",
+            "send_email"
+        )
+
+    except Exception as e:
+        return ActionResult(False, f"❌ Email failed: {e}", "send_email")
+
+
+# ─── System Controls ──────────────────────────────────────────────────────────
+
+def system_control(action: str) -> ActionResult:
+    """Power, lock, sleep, wifi, and battery controls."""
+    action = action.lower().strip()
+
+    if action in ("shutdown", "shut down", "turn off"):
+        subprocess.run(["shutdown", "/s", "/t", "10"], shell=True)
+        return ActionResult(True, "✅ Shutting down in 10 seconds... (run 'shutdown /a' to cancel)", "system")
+
+    elif action in ("restart", "reboot"):
+        subprocess.run(["shutdown", "/r", "/t", "10"], shell=True)
+        return ActionResult(True, "✅ Restarting in 10 seconds... (run 'shutdown /a' to cancel)", "system")
+
+    elif action in ("sleep",):
+        subprocess.run(["rundll32.exe", "powrprof.dll,SetSuspendState", "0", "1", "0"])
+        return ActionResult(True, "✅ Going to sleep...", "system")
+
+    elif action in ("lock", "lock screen"):
+        subprocess.run(["rundll32.exe", "user32.dll,LockWorkStation"])
+        return ActionResult(True, "✅ Screen locked", "system")
+
+    elif action in ("cancel shutdown", "abort shutdown"):
+        subprocess.run(["shutdown", "/a"], shell=True)
+        return ActionResult(True, "✅ Shutdown cancelled", "system")
+
+    elif action in ("wifi on", "enable wifi"):
+        subprocess.run(["netsh", "interface", "set", "interface", "Wi-Fi", "enable"], shell=True)
+        return ActionResult(True, "✅ Wi-Fi enabled", "system")
+
+    elif action in ("wifi off", "disable wifi"):
+        subprocess.run(["netsh", "interface", "set", "interface", "Wi-Fi", "disable"], shell=True)
+        return ActionResult(True, "✅ Wi-Fi disabled", "system")
+
+    elif action in ("battery", "battery status"):
+        try:
+            import psutil
+            b = psutil.sensors_battery()
+            if b:
+                status = "charging" if b.power_plugged else "on battery"
+                return ActionResult(True, f"🔋 Battery: {b.percent:.0f}% ({status})", "system")
+            return ActionResult(False, "❌ No battery detected (desktop PC?)", "system")
+        except Exception as e:
+            return ActionResult(False, f"❌ Battery check failed: {e}", "system")
+
+    elif action in ("mute",):
+        if PYAUTOGUI_AVAILABLE:
+            pyautogui.press("volumemute")
+            return ActionResult(True, "✅ Audio muted/unmuted", "system")
+        return ActionResult(False, "❌ pyautogui not installed", "system")
+
+    else:
+        return ActionResult(False, f"❌ Unknown system action: '{action}'", "system")
+
+
 # ─── Window Focus Helper ──────────────────────────────────────────────────────
 
 def _focus_window(app_name: str):
@@ -291,6 +453,19 @@ def execute_command(command_type: str, params: dict) -> ActionResult:
 
     elif cmd in ("key", "press_key", "hotkey"):
         return press_key(params.get("key", params.get("value", "")))
+
+    elif cmd in ("close_app", "close", "kill", "quit_app"):
+        return close_app(params.get("app", params.get("value", "")))
+
+    elif cmd in ("send_email", "email", "mail"):
+        return send_email(
+            to=params.get("to", params.get("email", "")),
+            subject=params.get("subject", "Message from Aura AI"),
+            body=params.get("body", params.get("message", ""))
+        )
+
+    elif cmd in ("system", "system_control", "power"):
+        return system_control(params.get("action", params.get("value", "")))
 
     elif cmd in ("open_discord",):
         res = open_app("discord")

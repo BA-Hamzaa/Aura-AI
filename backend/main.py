@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-from gemini_client import GeminiClient
+from gemini_client import GeminiClient, test_key
 from transcription import TranscriptionEngine
 from automation import parse_and_execute_actions, strip_action_tags, execute_command
 
@@ -116,9 +116,19 @@ def root():
 
 @app.post("/api/key")
 def set_api_key(req: ApiKeyRequest):
-    """Set the Gemini API key at runtime (no restart needed)."""
+    """Validate then set the Gemini API key at runtime (no restart needed)."""
     global api_key, gemini
-    api_key = req.api_key.strip()
+    new_key = req.api_key.strip()
+
+    # Live-test the key before accepting it
+    result = test_key(new_key)
+    if not result["ok"]:
+        raise HTTPException(
+            status_code=400,
+            detail=result["error"]
+        )
+
+    api_key = new_key
     gemini = GeminiClient(api_key)
     # Save to .env file for persistence
     env_path = os.path.join(os.path.dirname(__file__), ".env")
