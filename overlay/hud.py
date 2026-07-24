@@ -15,6 +15,12 @@ import sys
 import ctypes
 import math
 
+try:
+    import speech_recognition as sr
+    SR_AVAILABLE = True
+except ImportError:
+    SR_AVAILABLE = False
+
 # ── Tell Windows this is its own app (taskbar icon fix) ──────────────────────
 try:
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
@@ -78,7 +84,15 @@ FONT_MONO     = "Cascadia Code"
 def api_post(endpoint, payload=None, timeout=15):
     try:
         r = requests.post(f"{BACKEND}/{endpoint}", json=payload or {}, timeout=timeout)
-        return r.json()
+        if not r.content:
+            return {"error": "Empty response from server"}
+        try:
+            return r.json()
+        except Exception:
+            # FastAPI returns {"detail": ...} for HTTP errors
+            return {"detail": r.text or "Server error", "error": r.text or "Server error"}
+    except requests.exceptions.ConnectionError:
+        return {"error": "Backend not reachable — is the server running?"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -131,6 +145,8 @@ class AIAssistantHUD:
         self._icon_small = None
         self._tk_icon = None
         self._status_icon = None
+        self._mic_listening = False
+        self._mic_btn = None
 
         self._load_icon()
         self._build_ui()
@@ -257,6 +273,7 @@ class AIAssistantHUD:
                  font=(FONT, 8, "bold")).pack()
 
         self._make_ctrl_btn(right, "⚙", self._open_settings, TEXT_SEC).pack(side=tk.LEFT, padx=2)
+        self._make_ctrl_btn(right, "↺", self._action_refresh, ORANGE).pack(side=tk.LEFT, padx=2)
         self._make_ctrl_btn(right, "✕", self._on_close, RED).pack(side=tk.LEFT, padx=2)
 
         # Bottom border
@@ -368,7 +385,7 @@ class AIAssistantHUD:
         self.chat_input.bind("<Shift-Return>", lambda e: None)
         self._input_border = input_border
 
-        # Send button row
+        # Send / Mic button row
         btn_row = tk.Frame(input_panel, bg=BG_CARD)
         btn_row.pack(fill=tk.X, pady=(8, 0))
 
@@ -385,8 +402,23 @@ class AIAssistantHUD:
             activeforeground="white",
             command=self._send_chat
         )
-        send_btn.pack(side=tk.RIGHT)
+        send_btn.pack(side=tk.RIGHT, padx=(4, 0))
         self._hover(send_btn, ACCENT_HOVER, ACCENT)
+
+        # Mic button (voice-to-text)
+        mic_color = CYAN if SR_AVAILABLE else TEXT_MUTED
+        self._mic_btn = tk.Button(
+            btn_row, text="🎤",
+            bg=BG_CARD2, fg=mic_color,
+            font=(FONT, 12),
+            relief=tk.FLAT, bd=0, padx=10, pady=4,
+            cursor="hand2" if SR_AVAILABLE else "arrow",
+            activebackground=BG_INPUT, activeforeground=CYAN,
+            command=self._start_voice_input if SR_AVAILABLE else lambda: None
+        )
+        self._mic_btn.pack(side=tk.RIGHT, padx=(0, 4))
+        if SR_AVAILABLE:
+            self._hover(self._mic_btn, BG_INPUT, BG_CARD2, CYAN, mic_color)
 
         # Quick prompt chips (above input)
         chips_frame = tk.Frame(frame, bg=BG_DARK)
@@ -833,6 +865,63 @@ class AIAssistantHUD:
         self.chat_display.configure(state=tk.DISABLED)
         self._set_status("Session reset", ORANGE)
 
+    def _action_refresh(self):
+        """Refresh button: reset session and clear chat display."""
+        api_post("api/reset")
+        self._clear_transcript()
+        self.chat_display.configure(state=tk.NORMAL)
+        self.chat_display.delete("1.0", tk.END)
+        self.chat_display.configure(state=tk.DISABLED)
+        self._set_status("🔄  Session refreshed", ORANGE)
+        self._toast("Session refreshed!", ORANGE)
+
+    def _start_voice_input(self):
+        """Listen via microphone and fill the chat input with recognised text."""
+        if self._mic_listening:
+            return  # already listening
+        if not SR_AVAILABLE:
+            self._toast("SpeechRecognition not installed", RED)
+            return
+
+        self._mic_listening = True
+        if self._mic_btn:
+            self._mic_btn.configure(fg=RED, bg=BG_INPUT, text="🔴")
+        self._set_status("🎤  Listening...", CYAN)
+
+        def listen():
+            recognizer = sr.Recognizer()
+            try:
+                with sr.Microphone() as source:
+                    recognizer.adjust_for_ambient_noise(source, duration=0.4)
+                    audio = recognizer.listen(source, timeout=8, phrase_time_limit=15)
+                text = recognizer.recognize_google(audio)
+                self.root.after(0, self._inject_voice_text, text)
+            except sr.WaitTimeoutError:
+                self.root.after(0, self._toast, "No speech detected", ORANGE)
+            except sr.UnknownValueError:
+                self.root.after(0, self._toast, "Couldn't understand — try again", ORANGE)
+            except Exception as e:
+                self.root.after(0, self._toast, f"Mic error: {e}", RED)
+            finally:
+                self.root.after(0, self._mic_done)
+
+        threading.Thread(target=listen, daemon=True).start()
+
+    def _inject_voice_text(self, text: str):
+        """Put recognised speech into the chat input and send it."""
+        self.chat_input.delete("1.0", tk.END)
+        self.chat_input.configure(fg=TEXT_PRIMARY)
+        self.chat_input.insert("1.0", text)
+        # Auto-send after a brief moment so the user can see what was captured
+        self.root.after(300, self._send_chat)
+
+    def _mic_done(self):
+        """Reset mic button state after listening."""
+        self._mic_listening = False
+        if self._mic_btn:
+            self._mic_btn.configure(fg=CYAN, bg=BG_CARD2, text="🎤")
+        self._set_status("✅  AI ready", GREEN)
+
     def _action_rephrase(self):
         text = self.rephrase_input.get("1.0", tk.END).strip()
         if not text:
@@ -887,7 +976,7 @@ class AIAssistantHUD:
         d = tk.Toplevel(self.root)
         d.title("Settings")
         d.configure(bg=BG_DARK)
-        d.geometry("420x330")
+        d.geometry("440x380")
         d.attributes("-topmost", True)
         d.grab_set()
 
@@ -926,19 +1015,25 @@ class AIAssistantHUD:
                        bg=BG_DARK, fg=TEXT_SEC, selectcolor=BG_INPUT,
                        font=(FONT, 8), activebackground=BG_DARK).pack(anchor=tk.W, pady=6)
 
-        result_lbl = tk.Label(body, text="", fg=GREEN, bg=BG_DARK, font=(FONT, 8))
-        result_lbl.pack()
+        result_lbl = tk.Label(body, text="", fg=GREEN, bg=BG_DARK, font=(FONT, 8),
+                              wraplength=380, justify=tk.LEFT)
+        result_lbl.pack(anchor=tk.W)
 
         def save():
             key = key_entry.get().strip()
             if not key:
                 result_lbl.configure(text="Please enter an API key", fg=RED)
                 return
-            res = api_post("api/key", {"api_key": key})
-            if "error" in res:
-                result_lbl.configure(text=f"Error: {res['error']}", fg=RED)
+            result_lbl.configure(text="⏳ Verifying key...", fg=YELLOW)
+            d.update_idletasks()
+            res = api_post("api/key", {"api_key": key}, timeout=20)
+            # FastAPI HTTPException errors surface as {"detail": "..."} with status 400
+            if "detail" in res:
+                result_lbl.configure(text=f"❌  {res['detail']}", fg=RED)
+            elif "error" in res:
+                result_lbl.configure(text=f"❌  {res['error']}", fg=RED)
             else:
-                result_lbl.configure(text="✅  API key saved!", fg=GREEN)
+                result_lbl.configure(text="✅  Key verified and saved!", fg=GREEN)
                 self.api_key_configured = True
                 self.api_warning.pack_forget()
                 self._set_status("✅  AI ready", GREEN)
