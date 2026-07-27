@@ -316,9 +316,10 @@ class AIAssistantHUD:
         if code == self._current_language:
             return
         self._current_language = code
-        if self._lang_btn:
-            flags = {"en": "🇬🇧 EN", "fr": "🇫🇷 FR", "ar": "🇸🇦 AR"}
-            self._lang_btn.configure(text=flags.get(code, code))
+        names = {"en": "English", "fr": "Français", "ar": "عربي"}
+        if hasattr(self, "_lang_btn"):
+            self._lang_btn.configure(text=f"{names.get(code, code)} ▾")
+            
         def update():
             try:
                 requests.post(f"{BACKEND}/api/language", json={"language": code}, timeout=5)
@@ -329,9 +330,17 @@ class AIAssistantHUD:
         self.chat_display.configure(state=tk.NORMAL)
         self.chat_display.delete("1.0", tk.END)
         self.chat_display.configure(state=tk.DISABLED)
-        names = {"en": "English", "fr": "Français", "ar": "عربي"}
+        
         self._toast(f"🌐  {names.get(code, code)}", YELLOW)
         self._set_status(f"🌐  {names.get(code, code)}", YELLOW)
+
+    def _cycle_language(self, event=None):
+        order = ["en", "fr", "ar"]
+        try:
+            nxt = order[(order.index(self._current_language) + 1) % len(order)]
+        except ValueError:
+            nxt = "en"
+        self._set_language(nxt)
 
     def _apply_translations(self):
         simple_keys = ["subtitle", "api_warning", "input_hint", "send_btn", "clear_btn"]
@@ -455,33 +464,66 @@ class AIAssistantHUD:
         pill = tk.Frame(right, bg="#0a2018", padx=10, pady=4)
         pill.pack(side=tk.LEFT, padx=(0, 10))
         tk.Label(pill, text="🛡  STEALTH", fg=CYAN, bg="#0a2018", font=(FONT, 8, "bold")).pack()
-        self._tts_btn = self._make_ctrl_btn(right, "🔊", self._toggle_tts, CYAN)
-        self._tts_btn.pack(side=tk.LEFT, padx=2)
         self._voice_mode_btn = self._make_ctrl_btn(right, "🎤", self._activate_siri_mode, ACCENT_LIGHT)
         self._voice_mode_btn.pack(side=tk.LEFT, padx=2)
 
-        # Dropdown language selector
-        self._lang_btn = tk.Button(right, text="🇬🇧 EN", bg=BG_PANEL, fg=YELLOW, font=(FONT, 10, "bold"),
-            relief=tk.FLAT, bd=0, padx=8, pady=3, cursor="hand2", activebackground=BG_CARD)
+        # Custom Dropdown language selector
+        names = {"en": "English", "fr": "Français", "ar": "عربي"}
+        self._lang_btn = tk.Button(right, text=f"{names.get(self._current_language, 'English')} ▾", 
+                                   bg=BG_PANEL, fg=TEXT_PRIMARY, font=(FONT, 9, "bold"),
+                                   relief=tk.FLAT, bd=0, padx=8, pady=3, cursor="hand2", activebackground=BG_CARD)
         self._lang_btn.pack(side=tk.LEFT, padx=4)
+        
+        def _show_custom_dropdown(event):
+            if hasattr(self, "_lang_drop") and self._lang_drop.winfo_exists():
+                self._lang_drop.destroy()
+                return
+
+            # Compute relative position inside the root window
+            rx = self.root.winfo_rootx()
+            ry = self.root.winfo_rooty()
+            x = self._lang_btn.winfo_rootx() - rx
+            y = self._lang_btn.winfo_rooty() - ry + self._lang_btn.winfo_height() + 2
+
+            drop = tk.Frame(self.root, bg=BORDER)
+            drop.place(x=x, y=y, width=120)
+            self._lang_drop = drop
+            
+            f = tk.Frame(drop, bg=BG_DARK, padx=2, pady=2)
+            f.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+            
+            def _select(code, w=drop):
+                self._set_language(code)
+                w.destroy()
+                
+            for code, label in [("en", "English"), ("fr", "Français"), ("ar", "عربي")]:
+                fg = YELLOW if code == self._current_language else TEXT_PRIMARY
+                b = tk.Button(f, text=label, bg=BG_DARK, fg=fg, font=(FONT, 9),
+                              relief=tk.FLAT, bd=0, anchor="w", padx=12, pady=6, cursor="hand2",
+                              activebackground=BG_CARD, activeforeground="white")
+                b.pack(fill=tk.X)
+                b.bind("<Button-1>", lambda e, c=code: _select(c))
+                b.bind("<Enter>", lambda e, w=b: w.configure(bg=BG_CARD))
+                b.bind("<Leave>", lambda e, w=b: w.configure(bg=BG_DARK))
+                
+            # Close it if user clicks anywhere outside the drop frame
+            def _close_if_outside(e):
+                if not drop.winfo_exists(): return
+                dx, dy, dw, dh = drop.winfo_rootx(), drop.winfo_rooty(), drop.winfo_width(), drop.winfo_height()
+                if not (dx <= e.x_root <= dx + dw and dy <= e.y_root <= dy + dh):
+                    # Only destroy if they didn't just click the toggle button itself
+                    bx, by, bw, bh = self._lang_btn.winfo_rootx(), self._lang_btn.winfo_rooty(), self._lang_btn.winfo_width(), self._lang_btn.winfo_height()
+                    if not (bx <= e.x_root <= bx + bw and by <= e.y_root <= by + bh):
+                        drop.destroy()
+            
+            # Bind the click to the main root window
+            self.root.bind("<Button-1>", _close_if_outside, add="+")
+            
+        self._lang_btn.bind("<Button-1>", _show_custom_dropdown)
         self._lang_btn.bind("<Enter>", lambda e: self._lang_btn.configure(bg=BG_CARD))
         self._lang_btn.bind("<Leave>", lambda e: self._lang_btn.configure(bg=BG_PANEL))
 
-        # Build dropdown menu
-        lang_menu = tk.Menu(self.root, tearoff=0, bg=BG_CARD, fg=TEXT_PRIMARY, font=(FONT, 10),
-                            activebackground=ACCENT, activeforeground="white", bd=0, relief=tk.FLAT)
-        lang_menu.add_command(label="🇬🇧 English", command=lambda: self._set_language("en"))
-        lang_menu.add_command(label="🇫🇷 Français", command=lambda: self._set_language("fr"))
-        lang_menu.add_command(label="🇸🇦 عربي", command=lambda: self._set_language("ar"))
-
-        def _show_lang_menu(e):
-            x = self._lang_btn.winfo_rootx()
-            y = self._lang_btn.winfo_rooty() + self._lang_btn.winfo_height()
-            lang_menu.tk_popup(x, y)
-            
-        self._lang_btn.bind("<Button-1>", _show_lang_menu)
-
-        self._make_ctrl_btn(right, "⚙", self._open_settings, TEXT_SEC).pack(side=tk.LEFT, padx=2)
+        self._make_ctrl_btn(right, "⚙", self._open_settings, TEXT_SEC).pack(side=tk.LEFT, padx=(6, 2))
 
         self._make_ctrl_btn(right, "↺", self._action_refresh, ORANGE).pack(side=tk.LEFT, padx=2)
         self._make_ctrl_btn(right, "✕", self._on_close, RED).pack(side=tk.LEFT, padx=2)
@@ -795,7 +837,8 @@ class AIAssistantHUD:
         threading.Thread(target=self._fetch_ai_response, args=(prompt,), daemon=True).start()
 
     def _fetch_ai_response(self, q):
-        result = api_post("api/ask", {"question": q}, timeout=60)
+        # We pass speak=False so it only speaks if the user clicks the 🔊 icon
+        result = api_post("api/ask", {"question": q, "speak": False}, timeout=60)
         answer = result.get("answer", result.get("error", "No response"))
         # Fallback: if AI answered but didn't embed action tags, detect keywords
         self._try_keyword_action(q)
@@ -813,10 +856,32 @@ class AIAssistantHUD:
         content = self.chat_display.get("1.0", tk.END)
         idx = content.rfind("Thinking...")
         if idx >= 0:
-            start = f"1.0 + {idx} chars"
-            end = f"1.0 + {idx + len('Thinking...')} chars"
-            self.chat_display.delete(start, end)
-            self.chat_display.insert(start, answer, "ai_msg")
+            start_index = f"1.0 + {idx} chars"
+            end_index = f"1.0 + {idx + len('Thinking...')} chars"
+            self.chat_display.delete(start_index, end_index)
+            self.chat_display.insert(start_index, answer, "ai_msg")
+            
+            # Add a clickable speaker icon immediately after the text
+            speaker_idx = f"{start_index} + {len(answer)} chars"
+            self.chat_display.insert(speaker_idx, "  ")
+            
+            # We use a Label inside the Text widget
+            btn = tk.Label(
+                self.chat_display, 
+                text="🔊", 
+                bg=BG_DARK, 
+                fg=CYAN, 
+                font=(FONT, 10), 
+                cursor="hand2"
+            )
+            # When clicked, send exactly this answer text to the TTS endpoint
+            btn.bind("<Button-1>", lambda e, a=answer: threading.Thread(
+                target=lambda: api_post("api/tts/speak", {"text": a}), 
+                daemon=True
+            ).start())
+            
+            self.chat_display.window_create(f"{speaker_idx} + 2 chars", window=btn)
+
         self.chat_display.configure(state=tk.DISABLED)
         self.chat_display.see(tk.END)
 
@@ -1325,9 +1390,6 @@ class AIAssistantHUD:
                 enabled = r.get("enabled", True)
                 avail = r.get("available", False)
                 self._tts_enabled = enabled
-                icon = "🔊" if enabled else "🔇"
-                color = CYAN if enabled else TEXT_MUTED
-                self.root.after(0, lambda: self._tts_btn.configure(text=icon, fg=color))
                 if not avail:
                     self.root.after(0, lambda: self._set_status("⚠️  TTS unavailable — install pyttsx3", ORANGE))
             except Exception:
