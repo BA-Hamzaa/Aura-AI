@@ -1,6 +1,7 @@
 """
 Gemini AI Client — wraps Google's Gemini API for Aura AI.
 Uses the new google-genai SDK with smart model fallback + auto-retry.
+Supports both AIza... and AQ. key formats.
 """
 
 from google import genai
@@ -9,6 +10,32 @@ from typing import Optional
 import os
 import time
 import re
+
+
+def _unwrap(e: Exception) -> Exception:
+    """Unwrap tenacity RetryError to get the real underlying exception."""
+    try:
+        # tenacity wraps the real exception in RetryError.last_attempt
+        if hasattr(e, 'last_attempt') and e.last_attempt is not None:
+            real = e.last_attempt.exception()
+            if real is not None:
+                return real
+    except Exception:
+        pass
+    return e
+
+
+def _is_quota(e: Exception) -> bool:
+    """Return True if this exception (or its wrapped inner) is a quota/rate-limit error."""
+    real = _unwrap(e)
+    msg = str(real) + str(e)
+    return any(x in msg for x in ["429", "RESOURCE_EXHAUSTED", "quota"])
+
+
+def _is_invalid_key(e: Exception) -> bool:
+    real = _unwrap(e)
+    msg = str(real) + str(e)
+    return "401" in msg or "API_KEY_INVALID" in msg or "invalid api key" in msg.lower()
 
 
 # Model priority list — tries each in order until one works
@@ -22,35 +49,42 @@ MODELS = [
 
 def _friendly_error(e: Exception) -> str:
     """Convert SDK exceptions into short, user-readable messages."""
-    msg = str(e)
+    real = _unwrap(e)
+    msg = str(real) + str(e)
     if "429" in msg or "quota" in msg.lower() or "RESOURCE_EXHAUSTED" in msg:
         return (
-            "⚠️ Daily quota exhausted on this Google account.\n"
-            "Creating a new key on the SAME account won't help — the quota is shared.\n\n"
-            "👉 FIX: Sign in to a DIFFERENT Google account at aistudio.google.com,\n"
-            "   create a key there, and paste it in ⚙ Settings."
+            "[QUOTA] Daily quota exhausted on this Google account.\n"
+            "Creating a new key on the SAME account won't help - the quota is shared.\n\n"
+            "FIX: Sign in to a DIFFERENT Google account at aistudio.google.com,\n"
+            "create a key there, and paste it in Settings."
         )
-    if "401" in msg or "API_KEY_INVALID" in msg or "invalid" in msg.lower():
+    if "401" in msg or "API_KEY_INVALID" in msg or "invalid api key" in msg.lower():
         return (
-            "⚠️ Invalid API key — key rejected by Google.\n"
-            "👉 Double-check the key in ⚙ Settings (must start with AIza...)"
+            "[ERROR] Invalid API key - key rejected by Google.\n"
+            "Both AIza... and AQ. key formats are supported.\n"
+            "Double-check you copied the full key from aistudio.google.com"
         )
     if "403" in msg or "PERMISSION_DENIED" in msg:
         return (
-            "⚠️ API key doesn't have permission.\n"
-            "👉 Make sure the Gemini API is enabled in your Google Cloud project."
+            "[ERROR] API key does not have permission.\n"
+            "Make sure the Gemini API is enabled in your Google Cloud project."
         )
-    first_line = msg.split("\n")[0][:200]
-    return f"⚠️ AI Error: {first_line}"
+    first_line = str(real).split("\n")[0][:200]
+    return f"[ERROR] AI Error: {first_line}"
 
 
 def test_key(api_key: str) -> dict:
     """
     Quickly validate an API key. Returns {"ok": True} or {"ok": False, "error": "..."}.
-    Called from main.py before accepting a new key from the user.
+    Both AIza... and AQ. key formats are supported.
+    Quota-exhausted keys are still ACCEPTED - quota is a runtime limit, not a key error.
     """
     try:
-        client = genai.Client(api_key=api_key)
+        http_opts = types.HttpOptions(
+            retry_options=types.HttpRetryOptions(attempts=1),
+            timeout=10000
+        )
+        client = genai.Client(api_key=api_key, http_options=http_opts)
         client.models.generate_content(
             model="gemini-2.0-flash-lite",
             contents="hi",
@@ -58,111 +92,115 @@ def test_key(api_key: str) -> dict:
         )
         return {"ok": True}
     except Exception as e:
-        msg = str(e)
-        if "429" in msg or "quota" in msg.lower() or "RESOURCE_EXHAUSTED" in msg:
+        real = _unwrap(e)
+        msg = str(real) + str(e)
+        # Quota exhausted = key is valid (both AIza and AQ. formats), just no credits now
+        if "429" in msg or "RESOURCE_EXHAUSTED" in msg or "quota" in msg.lower():
             return {
-                "ok": False,
+                "ok": True,
                 "quota_exhausted": True,
-                "error": (
-                    "Quota exhausted on this Google account.\n"
-                    "Creating extra keys on the same account shares the same limit.\n"
-                    "Use a key from a DIFFERENT Google account."
+                "warning": (
+                    "Quota exhausted on this Google account. "
+                    "Key saved - wait 24h or use a key from a different Google account."
                 )
             }
-        if "401" in msg or "API_KEY_INVALID" in msg or "invalid" in msg.lower():
-            return {"ok": False, "error": "Invalid API key — rejected by Google. Double-check you copied the full key."}
+        # Truly invalid key
+        if "401" in msg or "API_KEY_INVALID" in msg or "invalid api key" in msg.lower():
+            return {"ok": False, "error": "Invalid API key - rejected by Google. Both AIza... and AQ. key formats are accepted - double-check you copied the full key."}
+        # Permission denied (API not enabled for project)
+        if "403" in msg or "PERMISSION_DENIED" in msg:
+            return {"ok": False, "error": "Permission denied - make sure the Gemini API is enabled for this key's project at console.cloud.google.com."}
         return {"ok": False, "error": _friendly_error(e)}
 
 
-SYSTEM_PROMPT = """You are Aura AI — a powerful computer automation assistant. You DIRECTLY CONTROL the user's computer.
+# Language rules injected into the system prompt
+_LANG_RULES = {
+    "en": "IMPORTANT: Always respond in English only, regardless of what language the user writes in.",
+    "fr": "IMPORTANT: Réponds TOUJOURS en français uniquement, peu importe la langue de l'utilisateur. Sois naturel et chaleureux en français.",
+    "ar": "مهم: أجب دائماً باللغة العربية فقط، بغض النظر عن لغة المستخدم. كن طبيعياً وودوداً بالعربية.",
+}
 
-CRITICAL: You have a real action execution system. When the user asks you to do ANYTHING on the computer, you MUST embed the correct action tag. You are NOT a regular chatbot — you are a computer controller.
 
-Embed actions using this format: <<ACTION:action_type|param1=value1|param2=value2>>
+def _build_system_prompt(language: str = "en") -> str:
+    lang_rule = _LANG_RULES.get(language, _LANG_RULES["en"])
+    return f"""You are Aura — a smart AI assistant like Siri, built into the user's Windows PC.
+You can TALK (voice) and also CONTROL the computer in real-time.
 
-=== YOUR CAPABILITIES ===
+== LANGUAGE ==
+{lang_rule}
 
-📧 EMAIL (YOU CAN SEND REAL EMAILS):
-  <<ACTION:send_email|to=EMAIL|subject=SUBJECT|body=BODY>>
-  - This opens Gmail and sends the email automatically. IT WORKS.
-  - If user says "send mail to X says Y" → use subject="Message" body=Y
+== PERSONALITY ==
+- Sound natural, friendly, and concise — like Siri or Google Assistant.
+- Responses must be SHORT (1-3 sentences max for voice). No long paragraphs.
+- No markdown (no **, no #, no bullet dashes) — responses are SPOKEN ALOUD.
+- Be warm and helpful, like a personal assistant.
 
-🌐 WEB & BROWSER:
-  <<ACTION:open_url|url=https://...>>
-  <<ACTION:search_google|query=...>>
-  <<ACTION:youtube|query=...>>
+== COMPUTER CONTROL ==
+Embed actions like this: <<ACTION:type|param=value>>
+NEVER refuse a task that has an action tag — just do it.
 
-💬 DISCORD:
-  <<ACTION:discord_send|message=...>>
-  <<ACTION:open_app|app=discord>>
+EMAIL: <<ACTION:send_email|to=EMAIL|subject=SUBJECT|body=BODY>>
+OPEN URL: <<ACTION:open_url|url=https://...>>
+SEARCH: <<ACTION:search_google|query=...>>
+YOUTUBE: <<ACTION:youtube|query=...>>
+APP OPEN: <<ACTION:open_app|app=chrome>> (chrome/spotify/notepad/vscode/vlc/discord/zoom/teams)
+APP CLOSE: <<ACTION:close_app|app=NAME>>
+SCREENSHOT: <<ACTION:screenshot>>
+VOLUME: <<ACTION:volume|level=50>>
+KEY: <<ACTION:key|key=ctrl+c>>
+TYPE: <<ACTION:type_text|text=Hello>>
+LOCK: <<ACTION:system|action=lock>>
+SLEEP: <<ACTION:system|action=sleep>>
+SHUTDOWN: <<ACTION:system|action=shutdown>>
+RESTART: <<ACTION:system|action=restart>>
+MUTE: <<ACTION:system|action=mute>>
+BATTERY: <<ACTION:system|action=battery>>
+WIFI ON: <<ACTION:system|action=wifi on>>
+WIFI OFF: <<ACTION:system|action=wifi off>>
 
-🖥️ APPS:
-  <<ACTION:open_app|app=chrome>>      (also: spotify, notepad, vscode, vlc, zoom, teams...)
-  <<ACTION:close_app|app=spotify>>
-  <<ACTION:screenshot>>
-  <<ACTION:volume|level=50>>
-  <<ACTION:key|key=ctrl+c>>
-  <<ACTION:type_text|text=Hello>>
+== EXAMPLES ==
+User: open spotify
+Aura: Opening Spotify! <<ACTION:open_app|app=spotify>>
 
-⚡ SYSTEM:
-  <<ACTION:system|action=lock>>
-  <<ACTION:system|action=sleep>>
-  <<ACTION:system|action=shutdown>>
-  <<ACTION:system|action=restart>>
-  <<ACTION:system|action=mute>>
-  <<ACTION:system|action=wifi on>>
-  <<ACTION:system|action=wifi off>>
-  <<ACTION:system|action=battery>>
+User: lock the screen
+Aura: Locking your screen now. <<ACTION:system|action=lock>>
 
-=== STRICT RULES ===
-1. ALWAYS use action tags for any computer task — never refuse.
-2. NEVER say "I can't", "I don't have the ability", "I'm unable to" for tasks that have action tags.
-3. NEVER say you cannot send emails — you CAN via <<ACTION:send_email|...>>.
-4. If email subject is missing, use "Message". If body is missing, use what the user said.
-5. Be short and direct. Just confirm + embed the tag.
-6. Support English and Arabic — respond in same language as user.
-7. Chain multiple actions if needed.
+User: search cats on youtube
+Aura: Sure! Searching YouTube for cats. <<ACTION:youtube|query=cats>>
 
-=== FORBIDDEN PHRASES (NEVER SAY THESE) ===
-- "I can't send emails"
-- "I don't have that functionality"  
-- "I'm unable to"
-- "I cannot directly"
-- "I don't have access to"
+User: battery
+Aura: Let me check your battery. <<ACTION:system|action=battery>>
 
-=== EXAMPLES ===
-User: "send mail to hamza@gmail.com says hi how are you"
-You: "Sending the email now! <<ACTION:send_email|to=hamza@gmail.com|subject=Message|body=hi how are you>>"
+User: close chrome
+Aura: Closing Chrome now. <<ACTION:close_app|app=chrome>>
 
-User: "send mail to :john@gmail.com , says : meeting tomorrow at 9am"
-You: "Sending! <<ACTION:send_email|to=john@gmail.com|subject=Meeting|body=meeting tomorrow at 9am>>"
-
-User: "open youtube"
-You: "Opening YouTube! <<ACTION:youtube>>"
-
-User: "close discord"
-You: "Closing Discord. <<ACTION:close_app|app=discord>>"
-
-User: "lock screen"
-You: "Locking screen! <<ACTION:system|action=lock>>"
-
-User: "open google and search python"  
-You: "Searching Google for Python! <<ACTION:search_google|query=python>>"
+REMEMBER: Keep answers short — they are SPOKEN OUT LOUD. No markdown. No long lists.
 """
 
 
-
 class GeminiClient:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, language: str = "en"):
         self.api_key = api_key
-        self.client = genai.Client(api_key=api_key)
+        self.language = language
+        http_opts = types.HttpOptions(
+            retry_options=types.HttpRetryOptions(attempts=1),
+            timeout=15000
+        )
+        self.client = genai.Client(api_key=api_key, http_options=http_opts)
         self.active_model = None
         self.chat_history = []   # manual history for context
         self.transcript_context = []
         self._find_working_model()
 
+    def set_language(self, language: str):
+        """Switch the response language: 'en', 'fr', or 'ar'."""
+        if language in _LANG_RULES:
+            self.language = language
+            self.chat_history = []  # clear history so context doesn't mix languages
+
     def _find_working_model(self):
-        """Probe each model in order, pick the first that responds."""
+        """Probe each model in order, pick the first that responds. Keep it fast."""
+        self.active_model = MODELS[0]  # Default fallback
         for model_name in MODELS:
             try:
                 self.client.models.generate_content(
@@ -173,49 +211,31 @@ class GeminiClient:
                 self.active_model = model_name
                 return
             except Exception as e:
-                msg = str(e)
+                # Unwrap tenacity RetryError to read the real error message
+                real = _unwrap(e)
+                msg = str(real) + str(e)
                 if any(x in msg for x in ["429", "RESOURCE_EXHAUSTED", "quota"]):
-                    continue  # quota exceeded, try next
-                elif "404" in msg or "not found" in msg.lower() or "no longer available" in msg.lower():
-                    continue  # model not available
-                # Unknown error — stop here, use this model anyway
-                self.active_model = model_name
+                    continue  # quota exceeded on this model, try next
+                elif any(x in msg for x in ["404", "not found", "no longer available"]):
+                    continue  # model not available, try next
+                # Any other error (network, auth) — keep default and bail
                 return
-
-        # All models exhausted quota — default to first, errors will surface as friendly messages
-        self.active_model = MODELS[0]
 
 
     def _call_model(self, model_name: str, contents: str) -> str:
-        """Call one model with automatic retry on per-minute rate limits."""
-        max_retries = 2
-        for attempt in range(max_retries + 1):
-            try:
-                resp = self.client.models.generate_content(
-                    model=model_name,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_PROMPT,
-                    )
+        """Call one model. Removes long sleeps so the UI doesn't hang."""
+        try:
+            resp = self.client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=_build_system_prompt(self.language),
                 )
-                return resp.text
-            except Exception as e:
-                msg = str(e)
-                is_quota = any(x in msg for x in ["429", "RESOURCE_EXHAUSTED", "quota"])
-                if not is_quota:
-                    raise  # non-quota error, let caller handle
-
-                # Check if this is a daily limit (limit: 0) or per-minute (short retry)
-                is_daily = "limit: 0" in msg
-                retry_match = re.search(r'seconds: (\d+)', msg)
-                retry_secs = int(retry_match.group(1)) if retry_match else 60
-
-                if is_daily or retry_secs > 120 or attempt >= max_retries:
-                    raise  # daily limit or too long to wait — bubble up
-
-                # Per-minute limit: wait and retry
-                time.sleep(min(retry_secs + 2, 35))
-        raise Exception("Max retries reached")
+            )
+            return resp.text
+        except Exception as e:
+            # Let _generate handle model fallback
+            raise
 
     def _generate(self, prompt: str, with_history: bool = False) -> str:
         """Generate content, falling back through models on quota/availability errors."""
@@ -251,22 +271,23 @@ class GeminiClient:
                 return answer
 
             except Exception as e:
-                msg = str(e)
+                # Unwrap tenacity RetryError to inspect real cause
+                real = _unwrap(e)
+                msg = str(real) + str(e)
                 if any(x in msg for x in ["429", "RESOURCE_EXHAUSTED", "quota"]):
                     continue  # try next model
-                elif "404" in msg or "not found" in msg.lower() or "no longer available" in msg.lower():
+                elif any(x in msg for x in ["404", "not found", "no longer available"]):
                     continue  # model gone, try next
                 else:
                     return _friendly_error(e)
 
         return (
-            "⚠️ Daily API quota exhausted on this key.\n"
+            "[QUOTA] Daily API quota exhausted on this key.\n"
             "Your key has no remaining quota for today.\n\n"
-            "👉 TO FIX THIS:\n"
+            "TO FIX THIS:\n"
             "1. Go to: aistudio.google.com/apikey\n"
             "2. Click 'Create API Key'\n"
-            "3. Copy the new key (starts with AIza...)\n"
-            "4. Click ⚙ Settings in this app and paste it in\n\n"
+            "3. Copy the new key and paste it in Settings\n\n"
             "Free tier resets every 24 hours."
         )
 
