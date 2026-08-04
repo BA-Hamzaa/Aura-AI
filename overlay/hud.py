@@ -31,7 +31,7 @@ except ImportError:
     WAKE_WORD_AVAILABLE = False
 
 try:
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(u'AuraAI.HUD.1')
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(u'JARVIS.HUD.1')
 except Exception:
     pass
 
@@ -39,7 +39,7 @@ sys.stdout = open(os.devnull, "w")
 sys.stderr = open(os.devnull, "w")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from stealth import apply_stealth, remove_stealth, hide_from_taskbar, hide_from_taskbar_early, get_window_hwnd, get_screen_size
+from stealth import apply_stealth, remove_stealth, hide_from_taskbar, hide_from_taskbar_early, show_in_taskbar, get_window_hwnd, get_screen_size
 
 try:
     from PIL import Image, ImageTk
@@ -111,7 +111,7 @@ TRANSLATIONS = {
         "live_lbl":          " LIVE",
         "connecting":        "Connecting...",
         "ai_ready":          "✅  AI ready",
-        "ai_ready_tts":      "✅  Aura ready (TTS on)",
+        "ai_ready_tts":      "✅  J.A.R.V.I.S. ready (TTS on)",
         "backend_connected": "✅  Backend connected",
         "hotkeys":           "Ctrl+Shift+Space: Hide  |  Alt+Space: Voice",
         "session_refreshed": "Session refreshed!",
@@ -149,7 +149,7 @@ TRANSLATIONS = {
         "live_lbl":          " EN DIRECT",
         "connecting":        "Connexion...",
         "ai_ready":          "✅  IA prête",
-        "ai_ready_tts":      "✅  Aura prête (voix activée)",
+        "ai_ready_tts":      "✅  J.A.R.V.I.S. prêt (voix activée)",
         "backend_connected": "✅  Serveur connecté",
         "hotkeys":           "Ctrl+Maj+Espace : Masquer  |  Alt+Espace : Voix",
         "session_refreshed": "Session réinitialisée !",
@@ -187,7 +187,7 @@ TRANSLATIONS = {
         "live_lbl":          " مباشر",
         "connecting":        "جارٍ الاتصال...",
         "ai_ready":          "✅  الذكاء الاصطناعي جاهز",
-        "ai_ready_tts":      "✅  أورا جاهزة (الصوت مفعّل)",
+        "ai_ready_tts":      "✅  J.A.R.V.I.S. جاهز (الصوت مفعّل)",
         "backend_connected": "✅  متصل بالخادم",
         "hotkeys":           "Ctrl+Shift+Space: إخفاء  |  Alt+Space: صوت",
         "session_refreshed": "تمت إعادة تعيين الجلسة!",
@@ -212,7 +212,7 @@ def api_post(endpoint, payload=None, timeout=60):
         except Exception:
             return {"detail": r.text or "Server error", "error": r.text or "Server error"}
     except requests.exceptions.ReadTimeout:
-        return {"error": "⚠️ Connection timed out — Aura is taking too long to think. Please try again."}
+        return {"error": "⚠️ Connection timed out — J.A.R.V.I.S. is taking too long to think. Please try again."}
     except requests.exceptions.ConnectionError:
         return {"error": "⚠️ Backend not reachable — is the server running?"}
     except Exception as e:
@@ -241,7 +241,7 @@ def rounded_rect(canvas, x1, y1, x2, y2, r=12, **kwargs):
 class AIAssistantHUD:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Aura AI")
+        self.root.title("J.A.R.V.I.S.")
         self.root.configure(bg=BG_ROOT)
         sw, sh = get_screen_size()
         w, h = 750, 580
@@ -250,7 +250,7 @@ class AIAssistantHUD:
         self.root.geometry(f"{w}x{h}+{x}+{y}")
         self.root.withdraw()
         self.root.overrideredirect(False)
-        self.root.attributes("-topmost", False)
+        self.root.attributes("-topmost", True)   # always stay above other windows
         self.root.attributes("-alpha", 0.97)
         self.root.resizable(True, True)
         self.root.minsize(380, 540)
@@ -292,19 +292,20 @@ class AIAssistantHUD:
         self.root.bind("<Alt-space>", lambda e: self._start_voice_input())
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # ── Phase 1: hide from taskbar BEFORE the window is ever shown ──────
+        # ── Phase 1: hide from taskbar and capture BEFORE the window is shown ──
         # update_idletasks() forces tkinter to allocate the real Win32 HWND
         # while the window is still withdrawn, so GetAncestor can walk up to
-        # the top-level handle and strip WS_EX_APPWINDOW immediately.
+        # the top-level handle immediately.
         self.root.update_idletasks()
-        hide_from_taskbar_early(self.root.winfo_id())
+        win_id = self.root.winfo_id()
+        hide_from_taskbar_early(win_id)
+        
+        # Apply stealth BEFORE the window is ever visible to prevent the 1-sec flash on stream
+        apply_stealth(hwnd_hint=win_id)
 
-        # ── Phase 2: show the window (taskbar button already suppressed) ─────
+        # ── Phase 2: show the window (taskbar suppressed & stealth active) ─────
         self.root.deiconify()
         self.root.update_idletasks()
-
-        # ── Phase 3: apply capture-exclusion once FindWindowW can locate it ──
-        self.root.after(500, self._apply_stealth)
 
         self._apply_translations()
 
@@ -448,7 +449,7 @@ class AIAssistantHUD:
         title_col.pack(side=tk.LEFT)
         title_col.bind("<Button-1>", self._start_drag)
         title_col.bind("<B1-Motion>", self._do_drag)
-        tk.Label(title_col, text="Aura AI", fg=TEXT_PRIMARY, bg=BG_PANEL,
+        tk.Label(title_col, text="J.A.R.V.I.S.", fg=TEXT_PRIMARY, bg=BG_PANEL,
                  font=(FONT_BOLD, 16, "bold")).pack(anchor=tk.W)
         
         sub_row = tk.Frame(title_col, bg=BG_PANEL)
@@ -461,9 +462,22 @@ class AIAssistantHUD:
 
         right = tk.Frame(hdr, bg=BG_PANEL)
         right.pack(side=tk.RIGHT, padx=12)
-        pill = tk.Frame(right, bg="#0a2018", padx=10, pady=4)
-        pill.pack(side=tk.LEFT, padx=(0, 10))
-        tk.Label(pill, text="🛡  STEALTH", fg=CYAN, bg="#0a2018", font=(FONT, 8, "bold")).pack()
+
+        # ── Stealth Toggle Pill ──────────────────────────────────────────────
+        self._stealth_pill = tk.Button(
+            right, text="🛡  STEALTH ON",
+            bg="#0a2018", fg=CYAN,
+            font=(FONT, 8, "bold"),
+            relief=tk.FLAT, bd=0, padx=10, pady=4,
+            cursor="hand2",
+            activebackground="#0d2a1e", activeforeground=CYAN,
+            command=self._toggle_stealth_btn
+        )
+        self._stealth_pill.pack(side=tk.LEFT, padx=(0, 10))
+        self._stealth_pill.bind("<Enter>", lambda e: self._stealth_pill.configure(bg="#0d2a1e"))
+        self._stealth_pill.bind("<Leave>", lambda e: self._stealth_pill.configure(
+            bg="#0a2018" if self._stealth_on else "#2a0a0a"))
+
         self._voice_mode_btn = self._make_ctrl_btn(right, "🎤", self._activate_siri_mode, ACCENT_LIGHT)
         self._voice_mode_btn.pack(side=tk.LEFT, padx=2)
 
@@ -1019,7 +1033,7 @@ class AIAssistantHUD:
         self.chat_input.configure(fg=TEXT_PRIMARY)
         q = text.strip()
         self._append_chat("You 🎤", q, "user_label", "user_msg")
-        self._append_chat("Aura", "Thinking...", "ai_label", "thinking")
+        self._append_chat("J.A.R.V.I.S.", "Thinking...", "ai_label", "thinking")
         threading.Thread(target=self._fetch_voice_response, args=(q,), daemon=True).start()
 
     def _fetch_voice_response(self, text):
@@ -1253,12 +1267,31 @@ class AIAssistantHUD:
         """Apply screen-capture exclusion + taskbar hiding. Must be called AFTER the window is visible."""
         def _do():
             # 1. Exclude window content from screen-capture (Discord, OBS, Teams, etc.)
-            success = apply_stealth(title="Aura AI")
+            success = apply_stealth(title="J.A.R.V.I.S.")
             # 2. Remove taskbar button so the icon doesn't appear in the nav bar
-            hide_from_taskbar(title="Aura AI")
+            hide_from_taskbar(title="J.A.R.V.I.S.")
             msg = (self._tr("stealth_active"), GREEN) if success else ("⚠️  Stealth requires Windows 10 v2004+", ORANGE)
             self.root.after(0, lambda: self._set_status(*msg))
         threading.Thread(target=_do, daemon=True).start()
+
+    def _toggle_stealth_btn(self):
+        """Toggle stealth mode from the header pill button."""
+        self._toggle_visibility()
+        # Update pill appearance to reflect current state
+        if self._stealth_on:
+            self._stealth_pill.configure(
+                text="🛡  STEALTH ON",
+                bg="#0a2018", fg=CYAN,
+                activebackground="#0d2a1e", activeforeground=CYAN
+            )
+            self._stealth_pill.bind("<Leave>", lambda e: self._stealth_pill.configure(bg="#0a2018"))
+        else:
+            self._stealth_pill.configure(
+                text="👁  STEALTH OFF",
+                bg="#2a0a0a", fg=RED,
+                activebackground="#3a1010", activeforeground=RED
+            )
+            self._stealth_pill.bind("<Leave>", lambda e: self._stealth_pill.configure(bg="#2a0a0a"))
 
     def _check_backend(self):
         def check():
@@ -1307,9 +1340,10 @@ class AIAssistantHUD:
                 color = GREEN if msg.get("success", True) else RED
                 self.root.after(0, self._toast, msg.get("text", ""), color)
             elif t == "voice_response":
-                q = msg.get("question", "")
-                ans = msg.get("text", "")
-                if q: self.root.after(0, self._show_voice_exchange, q, ans)
+                # Intentionally ignored: _fetch_voice_response already calls
+                # _replace_thinking() directly when the HTTP response returns.
+                # Handling this WebSocket event would cause the question to appear twice.
+                pass
             elif t == "connected":
                 tts_ok = msg.get("tts_available", False)
                 if tts_ok:
@@ -1317,9 +1351,12 @@ class AIAssistantHUD:
         except Exception:
             pass
 
-    def _show_voice_exchange(self, question: str, answer: str):
-        self._append_chat("You 🎤", question, "user_label", "user_msg")
-        self._replace_thinking(answer) if "Thinking..." in self.chat_display.get("1.0", tk.END) else self._append_chat("Aura", answer, "ai_label", "ai_msg")
+    def _update_voice_answer(self, answer: str):
+        """Update the AI answer in chat without re-adding the user question."""
+        if "Thinking..." in self.chat_display.get("1.0", tk.END):
+            self._replace_thinking(answer)
+        # If Thinking... was already replaced by _fetch_voice_response, do nothing
+        # (answer is already displayed via _replace_thinking called directly)
 
     def _toast(self, message, color=None):
         color = color or GREEN
@@ -1349,36 +1386,52 @@ class AIAssistantHUD:
 
 
     def _toggle_visibility(self, event=None):
-        """Toggle screen-share invisibility.
-        The window always stays visible to the local user.
-        When stealth is ON  → viewers on screen share see nothing (black).
-        When stealth is OFF → viewers see the window normally.
-        Uses FindWindowW internally to get the real Win32 HWND.
+        """Toggle stealth mode.
+        Stealth ON  -> always-on-top, hidden from taskbar, hidden from screen share.
+        Stealth OFF -> normal window (no priority), visible in taskbar, visible in screen share.
         """
         if self._stealth_on:
-            # Disable exclusion — window becomes visible to screen share
+            # ── STEALTH OFF ─────────────────────────────────────────────────
             self._stealth_on = False
+            self.root.attributes("-topmost", False)
+
             def _off():
-                remove_stealth(title="Aura AI")
+                remove_stealth(title="J.A.R.V.I.S.")
+                show_in_taskbar(title="J.A.R.V.I.S.")
+                # Withdraw + deiconify on main thread so Windows Shell creates
+                # the taskbar button (style-change alone is not enough)
+                def _refresh_taskbar():
+                    try:
+                        self.root.withdraw()
+                        self.root.after(80, self.root.deiconify)
+                    except Exception:
+                        pass
+                self.root.after(0, _refresh_taskbar)
+
             threading.Thread(target=_off, daemon=True).start()
-            self._toast("👁  Screen-share visible — they can see you!", RED)
-            self._set_status("👁  Screen-share: VISIBLE", RED)
+            self._toast("👁  Normal mode — window is visible to others!", RED)
+            self._set_status("👁  Normal mode: VISIBLE", RED)
             try:
-                self._hint_label.configure(text="Ctrl+Shift+Space: Shield OFF  |  Alt+Space: Voice")
+                self._hint_label.configure(text="Ctrl+Shift+Space: Stealth OFF  |  Alt+Space: Voice")
             except Exception:
                 pass
         else:
-            # Re-enable exclusion — window hidden from screen share
+            # ── STEALTH ON ──────────────────────────────────────────────────
             self._stealth_on = True
+            self.root.attributes("-topmost", True)
+
             def _on():
-                apply_stealth(title="Aura AI")
+                apply_stealth(title="J.A.R.V.I.S.")
+                hide_from_taskbar(title="J.A.R.V.I.S.")
+
             threading.Thread(target=_on, daemon=True).start()
-            self._toast("🛡️  Screen-share hidden — you are invisible!", CYAN)
-            self._set_status("🛡️  Screen-share: HIDDEN", CYAN)
+            self._toast("🛡️  Stealth ON — always on top & invisible to screen share!", CYAN)
+            self._set_status("🛡️  Stealth: ACTIVE", CYAN)
             try:
-                self._hint_label.configure(text="Ctrl+Shift+Space: Shield ON  |  Alt+Space: Voice")
+                self._hint_label.configure(text="Ctrl+Shift+Space: Stealth ON  |  Alt+Space: Voice")
             except Exception:
                 pass
+
 
     def run(self):
         self.root.mainloop()

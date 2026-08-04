@@ -34,7 +34,7 @@ user32.GetWindowLongW.restype  = ctypes.c_long
 user32.SetWindowLongW.restype  = ctypes.c_long
 
 
-def _get_real_hwnd(title: str = "Aura AI") -> int:
+def _get_real_hwnd(title: str = "J.A.R.V.I.S.") -> int:
     """
     Find the actual Win32 top-level HWND for our window.
 
@@ -63,7 +63,7 @@ def _get_real_hwnd(title: str = "Aura AI") -> int:
     return found.value
 
 
-def apply_stealth(hwnd_hint: int = 0, title: str = "Aura AI") -> bool:
+def apply_stealth(hwnd_hint: int = 0, title: str = "J.A.R.V.I.S.") -> bool:
     """
     Exclude the window from all screen-capture APIs.
 
@@ -97,7 +97,7 @@ def apply_stealth(hwnd_hint: int = 0, title: str = "Aura AI") -> bool:
         return False
 
 
-def remove_stealth(hwnd_hint: int = 0, title: str = "Aura AI") -> bool:
+def remove_stealth(hwnd_hint: int = 0, title: str = "J.A.R.V.I.S.") -> bool:
     """
     Remove screen-capture exclusion — window becomes visible to screen share.
     """
@@ -183,7 +183,7 @@ def hide_from_taskbar_early(child_hwnd: int) -> bool:
     return _apply_toolwindow_style(real_hwnd)
 
 
-def hide_from_taskbar(title: str = "Aura AI") -> bool:
+def hide_from_taskbar(title: str = "J.A.R.V.I.S.") -> bool:
     """
     Hide the window from the taskbar by locating it via its title.
     Use this AFTER the window is visible (FindWindowW works on visible windows).
@@ -198,3 +198,39 @@ def hide_from_taskbar(title: str = "Aura AI") -> bool:
         return False
 
     return _apply_toolwindow_style(hwnd)
+
+
+def show_in_taskbar(title: str = "J.A.R.V.I.S.") -> bool:
+    """
+    Apply the WS_EX_APPWINDOW style so the Shell will show a taskbar button.
+
+    NOTE: After calling this, you MUST briefly hide-and-re-show the Tkinter
+    window on the main thread (withdraw + deiconify) so the Shell picks up the
+    style change.  hud.py handles that via root.after().
+    """
+    if sys.platform != "win32":
+        return False
+
+    hwnd = _get_real_hwnd(title)
+    if not hwnd:
+        return False
+
+    try:
+        ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        # Remove tool-window flag, add app-window flag
+        ex = (ex & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex)
+
+        # Notify the Shell of the style change
+        SWP_NOMOVE       = 0x0002
+        SWP_NOSIZE       = 0x0001
+        SWP_NOACTIVATE   = 0x0010
+        SWP_FRAMECHANGED = 0x0020
+        HWND_NOTOPMOST   = -2   # don't force topmost when coming out of stealth
+        user32.SetWindowPos(
+            hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED
+        )
+        return True
+    except Exception:
+        return False
